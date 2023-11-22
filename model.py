@@ -1,4 +1,3 @@
-from torch import load
 from flax import linen as nn
 from flax import traverse_util
 from dataclasses import dataclass
@@ -114,60 +113,61 @@ config = PhiConfig(n_head=4, n_layer=2, n_embed=256, rotary_dim=16, n_positions=
 
 # config = PhiConfig()
 phi = Phi(config)
-# x = random.randint(random.PRNGKey(0), (1, config.n_positions), 0, 51200, dtype=jnp.int32)
+x = random.randint(random.PRNGKey(0), (8, config.n_positions), 0, 51200, dtype=jnp.int32)
+variables = phi.init(random.PRNGKey(0), x)
 # print(phi.tabulate(random.PRNGKey(0), x))
 
-variables = phi.init(random.PRNGKey(0), jnp.ones((4, config.n_positions), dtype=jnp.int32))
+# variables = phi.init(random.PRNGKey(0), jnp.ones((4, config.n_positions), dtype=jnp.int32))
 
-print(traverse_util.path_aware_map(lambda k, v: print(k, v.shape), variables["params"]))
+# print(traverse_util.path_aware_map(lambda k, v: print(k, v.shape), variables["params"]))
 
-def init_train_state(batch_size) -> TrainState:
-    config = PhiConfig()
-    phi = Phi(config)
-    model = torch.load("pytorch_model.bin")
-    variables = phi.init(random.PRNGKey(0), jnp.ones((batch_size, config.n_positions), dtype=jnp.int32))
-    variables = load_model_into_flax(model, variables)
+# def init_train_state(batch_size) -> TrainState:
+#     config = PhiConfig()
+#     phi = Phi(config)
+#     model = torch.load("pytorch_model.bin")
+#     variables = phi.init(random.PRNGKey(0), jnp.ones((batch_size, config.n_positions), dtype=jnp.int32))
+#     variables = load_model_into_flax(model, variables)
 
-    partition_optimizers = {"trainable": adamw(), "frozen": set_to_zero()}
-    param_partitions = traverse_util.path_aware_map(
-        lambda path, _: "trainable" if ("Dense_2" in path or  "Dense_3" in path) else "frozen", variables["params"])
+#     partition_optimizers = {"trainable": adamw(0.001), "frozen": set_to_zero()}
+#     param_partitions = traverse_util.path_aware_map(
+#         lambda path, _: "trainable" if ("Dense_2" in path or  "Dense_3" in path) else "frozen", variables["params"])
 
-    return TrainState.create(
-        apply_fn=phi.apply,
-        tx=multi_transform(partition_optimizers, param_partitions),
-        params=variables["params"]
-    )
+#     return TrainState.create(
+#         apply_fn=phi.apply,
+#         tx=multi_transform(partition_optimizers, param_partitions),
+#         params=variables["params"]
+#     )
 
-model = load("pytorch_model.bin")
+# model = load("pytorch_model.bin")
 
-def load_model_into_flax(model, variables) -> dict:
-    j = 0
-    for param_name in model:
-        param_name = param_name.replace("layers.", "")
-        i = int(param_name.split(".")[0])
-        jnp_array = jnp.array(model[param_name].numpy()).astype(jnp.float16)
-        if i == 0:
-            variables["params"][f"Embed_{i}"]["embedding"] = jnp_array
-        elif not param_name.endswith("inv_freq"):
-            match i:
-                case 0: variables["params"][f"Block_{i}"]["LayerNorm_0"]["scale"] = jnp_array; j += 1
-                case 1: variables["params"][f"Block_{i}"]["LayerNorm_0"]["bias"] = jnp_array; j += 1
-                case 2: variables["params"][f"Block_{i}"]["SelfAttention_0"]["Dense_0"]["kernel"] = jnp_array; j += 1
-                case 3: variables["params"][f"Block_{i}"]["SelfAttention_0"]["Dense_0"]["bias"] = jnp_array; j += 1
-                case 4: variables["params"][f"Block_{i}"]["SelfAttention_0"]["Dense_1"]["kernel"] = jnp_array; j += 1
-                case 5: variables["params"][f"Block_{i}"]["SelfAttention_0"]["Dense_1"]["bias"] = jnp_array; j += 1
-                case 6: variables["params"][f"Block_{i}"]["MLP_0"]["Dense_0"]["kernel"] = jnp_array; j += 1
-                case 7: variables["params"][f"Block_{i}"]["MLP_0"]["Dense_0"]["bias"] = jnp_array; j += 1
-                case 8: variables["params"][f"Block_{i}"]["MLP_0"]["Dense_1"]["kernel"] = jnp_array; j += 1
-                case 9: variables["params"][f"Block_{i}"]["MLP_0"]["Dense_1"]["bias"] = jnp_array; j += 1
-                case 10: j = 0
-    return variables
+# def load_model_into_flax(model, variables) -> dict:
+#     j = 0
+#     for param_name in model:
+#         param_name = param_name.replace("layers.", "")
+#         i = int(param_name.split(".")[0])
+#         jnp_array = jnp.array(model[param_name].numpy()).astype(jnp.float16)
+#         if i == 0:
+#             variables["params"][f"Embed_{i}"]["embedding"] = jnp_array
+#         elif not param_name.endswith("inv_freq"):
+#             match i:
+#                 case 0: variables["params"][f"Block_{i}"]["LayerNorm_0"]["scale"] = jnp_array; j += 1
+#                 case 1: variables["params"][f"Block_{i}"]["LayerNorm_0"]["bias"] = jnp_array; j += 1
+#                 case 2: variables["params"][f"Block_{i}"]["SelfAttention_0"]["Dense_0"]["kernel"] = jnp_array; j += 1
+#                 case 3: variables["params"][f"Block_{i}"]["SelfAttention_0"]["Dense_0"]["bias"] = jnp_array; j += 1
+#                 case 4: variables["params"][f"Block_{i}"]["SelfAttention_0"]["Dense_1"]["kernel"] = jnp_array; j += 1
+#                 case 5: variables["params"][f"Block_{i}"]["SelfAttention_0"]["Dense_1"]["bias"] = jnp_array; j += 1
+#                 case 6: variables["params"][f"Block_{i}"]["MLP_0"]["Dense_0"]["kernel"] = jnp_array; j += 1
+#                 case 7: variables["params"][f"Block_{i}"]["MLP_0"]["Dense_0"]["bias"] = jnp_array; j += 1
+#                 case 8: variables["params"][f"Block_{i}"]["MLP_0"]["Dense_1"]["kernel"] = jnp_array; j += 1
+#                 case 9: variables["params"][f"Block_{i}"]["MLP_0"]["Dense_1"]["bias"] = jnp_array; j += 1
+#                 case 10: j = 0
+#     return variables
 
-@jit
-def train_step(state: TrainState, batch: Array):
-    def loss_fn(params):
-        return phi.apply({"params": params}, batch)
+# @jit
+# def train_step(state: TrainState, batch: Array):
+#     def loss_fn(params):
+#         return phi.apply({"params": params}, batch)
     
-    grad_fn = value_and_grad(loss_fn)
-    losses, grads = grad_fn(state.params)
-    return state.apply_gradients(grads=grads)
+#     grad_fn = value_and_grad(loss_fn)
+#     losses, grads = grad_fn(state.params)
+#     return state.apply_gradients(grads=grads)
