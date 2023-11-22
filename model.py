@@ -1,7 +1,11 @@
+from torch import load
 from flax import linen as nn
-from jax import Array, random
+from flax import traverse_util
 from dataclasses import dataclass
-from jax import numpy as jnp, ensure_compile_time_eval
+from jax import Array, jit, random
+from flax.training.train_state import TrainState
+from optax import adamw, set_to_zero, multi_transform, l2_loss
+from jax import numpy as jnp, value_and_grad, ensure_compile_time_eval
 
 @dataclass
 class PhiConfig:
@@ -12,7 +16,8 @@ class PhiConfig:
     ln_eps: float = 1e-05
     n_positions: int = 2048
     vocab_size: int = 51200
-    param_dtype: jnp.dtype = jnp.float16
+    target_hidden_size: int = 2048
+    param_dtype: jnp.dtype = jnp.bfloat16
 
 def compute_cos_sin(config: PhiConfig) -> (Array, Array):
     t = jnp.arange(config.n_positions, dtype=jnp.float32)
@@ -70,30 +75,99 @@ class MLP(nn.Module):
     config: PhiConfig
 
     @nn.compact
-    def __call__(self, x: Array) -> Array:
+    def __call__(self, x: Array) -> (Array, Array):
         h = nn.Dense(features=self.config.n_embed * 4, use_bias=True, param_dtype=self.config.param_dtype)(x)
-        return nn.Dense(features=self.config.n_embed, use_bias=True, param_dtype=self.config.param_dtype)(nn.gelu(h))
+        h = nn.Dense(features=self.config.n_embed, use_bias=True, param_dtype=self.config.param_dtype)(nn.gelu(h))
+
+        l = nn.Dense(features=self.config.target_hidden_size, use_bias=True, param_dtype=self.config.param_dtype)(x)
+        l = nn.Dense(features=self.config.n_embed, use_bias=True, param_dtype=self.config.param_dtype)(nn.gelu(l))
+
+        return (h, l2_loss(l, h))
 
 class Block(nn.Module):
     config: PhiConfig
 
     @nn.compact
-    def __call__(self, x: Array) -> Array:
+    def __call__(self, x: Array) -> (Array, Array):
         h = nn.LayerNorm(epsilon=self.config.ln_eps, param_dtype=self.config.param_dtype)(x)
         a = SelfAttention(self.config)(h)
-        return a + MLP(self.config)(h)
+        (h, loss) = MLP(self.config)(h)
+        return (a + h, loss)
 
 class Phi(nn.Module):
     config: PhiConfig
 
     @nn.compact
-    def __call__(self, x: Array) -> Array:
+    def __call__(self, x: Array) -> list[Array]:
+        losses = jnp.zeros((1,), dtype=jnp.float16)
         h = nn.Embed(num_embeddings=self.config.vocab_size, features=self.config.n_embed, param_dtype=self.config.param_dtype)(x)
         for _ in range(self.config.n_layer):
-            h = Block(self.config)(h)
-        h = nn.LayerNorm(epsilon=self.config.ln_eps, param_dtype=self.config.param_dtype)(h)
-        return nn.Dense(self.config.vocab_size, use_bias=True, param_dtype=self.config.param_dtype)(h)
+            (h, loss) = Block(self.config)(h)
+            losses += loss
+        # useless layers while training
+        # h = nn.LayerNorm(epsilon=self.config.ln_eps, param_dtype=self.config.param_dtype)(h)
+        # o = nn.Dense(self.config.vocab_size, use_bias=True, param_dtype=self.config.param_dtype)(h)
+        return losses
     
-phi = Phi(PhiConfig())
-x = random.randint(random.PRNGKey(0), (128, 2048), 0, 51200, dtype=jnp.int32)
-phi.tabulate(random.PRNGKey(0), x)
+# light config
+config = PhiConfig(n_head=4, n_layer=2, n_embed=256, rotary_dim=16, n_positions=16, vocab_size=51200, target_hidden_size=16)
+
+# config = PhiConfig()
+phi = Phi(config)
+# x = random.randint(random.PRNGKey(0), (1, config.n_positions), 0, 51200, dtype=jnp.int32)
+# print(phi.tabulate(random.PRNGKey(0), x))
+
+variables = phi.init(random.PRNGKey(0), jnp.ones((4, config.n_positions), dtype=jnp.int32))
+
+print(traverse_util.path_aware_map(lambda k, v: print(k, v.shape), variables["params"]))
+
+def init_train_state(batch_size) -> TrainState:
+    config = PhiConfig()
+    phi = Phi(config)
+    model = torch.load("pytorch_model.bin")
+    variables = phi.init(random.PRNGKey(0), jnp.ones((batch_size, config.n_positions), dtype=jnp.int32))
+    variables = load_model_into_flax(model, variables)
+
+    partition_optimizers = {"trainable": adamw(), "frozen": set_to_zero()}
+    param_partitions = traverse_util.path_aware_map(
+        lambda path, _: "trainable" if ("Dense_2" in path or  "Dense_3" in path) else "frozen", variables["params"])
+
+    return TrainState.create(
+        apply_fn=phi.apply,
+        tx=multi_transform(partition_optimizers, param_partitions),
+        params=variables["params"]
+    )
+
+model = load("pytorch_model.bin")
+
+def load_model_into_flax(model, variables) -> dict:
+    j = 0
+    for param_name in model:
+        param_name = param_name.replace("layers.", "")
+        i = int(param_name.split(".")[0])
+        jnp_array = jnp.array(model[param_name].numpy()).astype(jnp.float16)
+        if i == 0:
+            variables["params"][f"Embed_{i}"]["embedding"] = jnp_array
+        elif not param_name.endswith("inv_freq"):
+            match i:
+                case 0: variables["params"][f"Block_{i}"]["LayerNorm_0"]["scale"] = jnp_array; j += 1
+                case 1: variables["params"][f"Block_{i}"]["LayerNorm_0"]["bias"] = jnp_array; j += 1
+                case 2: variables["params"][f"Block_{i}"]["SelfAttention_0"]["Dense_0"]["kernel"] = jnp_array; j += 1
+                case 3: variables["params"][f"Block_{i}"]["SelfAttention_0"]["Dense_0"]["bias"] = jnp_array; j += 1
+                case 4: variables["params"][f"Block_{i}"]["SelfAttention_0"]["Dense_1"]["kernel"] = jnp_array; j += 1
+                case 5: variables["params"][f"Block_{i}"]["SelfAttention_0"]["Dense_1"]["bias"] = jnp_array; j += 1
+                case 6: variables["params"][f"Block_{i}"]["MLP_0"]["Dense_0"]["kernel"] = jnp_array; j += 1
+                case 7: variables["params"][f"Block_{i}"]["MLP_0"]["Dense_0"]["bias"] = jnp_array; j += 1
+                case 8: variables["params"][f"Block_{i}"]["MLP_0"]["Dense_1"]["kernel"] = jnp_array; j += 1
+                case 9: variables["params"][f"Block_{i}"]["MLP_0"]["Dense_1"]["bias"] = jnp_array; j += 1
+                case 10: j = 0
+    return variables
+
+@jit
+def train_step(state: TrainState, batch: Array):
+    def loss_fn(params):
+        return phi.apply({"params": params}, batch)
+    
+    grad_fn = value_and_grad(loss_fn)
+    losses, grads = grad_fn(state.params)
+    return state.apply_gradients(grads=grads)
