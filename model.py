@@ -113,9 +113,9 @@ config = PhiConfig(n_head=4, n_layer=2, n_embed=256, rotary_dim=16, n_positions=
 
 # config = PhiConfig()
 phi = Phi(config)
-x = random.randint(random.PRNGKey(0), (8, config.n_positions), 0, 51200, dtype=jnp.int32)
-variables = phi.init(random.PRNGKey(0), x)
-# print(phi.tabulate(random.PRNGKey(0), x))
+x = random.randint(random.PRNGKey(0), (1, config.n_positions), 0, 51200, dtype=jnp.int32)
+# variables = phi.init(random.PRNGKey(0), x)
+print(phi.tabulate(random.PRNGKey(0), x))
 
 # variables = phi.init(random.PRNGKey(0), jnp.ones((4, config.n_positions), dtype=jnp.int32))
 
